@@ -1,0 +1,10 @@
+streamlit
+requests
+youtube_transcript_api
+beautifulsoup4
+fake_useragent
+cloudscraper
+pandas
+nltk
+google-generativeai
+tiktoken
