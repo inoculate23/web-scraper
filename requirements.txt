@@ -8,3 +8,4 @@ pandas
 nltk
 google-generativeai
 tiktoken
+python-dotenv
