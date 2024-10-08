@@ -6,26 +6,25 @@ import re
 import urllib.parse as urlparse
 from fake_useragent import UserAgent
 import cloudscraper
-import time
-import random
 import pandas as pd
 import base64
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
+from collections import Counter
+from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
 import google.generativeai as genai
 import tiktoken
 import json
 import os
 from dotenv import load_dotenv
+import textstat  # For readability scores
+import streamlit.components.v1 as components
 
+# Load environment variables from .env file
 load_dotenv()
 
-nltk.download('punkt', quiet=True)
-nltk.download('stopwords', quiet=True)
-
+# Set up Streamlit page configuration
 st.set_page_config(layout="wide", page_title="Web Scraper", page_icon="🔍")
 
+# Apply custom CSS for styling
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
@@ -106,17 +105,25 @@ body {
 </style>
 """, unsafe_allow_html=True)
 
+# Page title and subtitle
 st.markdown('<p class="big-font"><span class="magnify">🔍</span>Web Scraper</p>', unsafe_allow_html=True)
-st.markdown('<p class="medium-font">Extract, summarize and analyze content from any website or YouTube video with ease!</p>', unsafe_allow_html=True)
+st.markdown('<p class="medium-font">Extract, summarize, and analyze content from any website or YouTube video with ease!</p>', unsafe_allow_html=True)
 
+# User input for URL
 url_input = st.text_input("Enter URL to scrape (Website or YouTube)", key="url_input")
 scrape_button = st.button("🚀 Start Scraping")
 
 def get_human_like_user_agent():
+    """
+    Generate a random human-like user agent string.
+    """
     ua = UserAgent()
     return ua.random
 
 def extract_video_id(url):
+    """
+    Extract the YouTube video ID from a given URL.
+    """
     parsed_url = urlparse.urlparse(url)
     if parsed_url.hostname == 'youtu.be':
         return parsed_url.path[1:]
@@ -124,13 +131,16 @@ def extract_video_id(url):
         if parsed_url.path == '/watch':
             query = urlparse.parse_qs(parsed_url.query)
             return query['v'][0]
-        if parsed_url.path[:7] == '/embed/':
+        if parsed_url.path.startswith('/embed/'):
             return parsed_url.path.split('/')[2]
-        if parsed_url.path[:3] == '/v/':
+        if parsed_url.path.startswith('/v/'):
             return parsed_url.path.split('/')[2]
     raise ValueError("Invalid YouTube URL")
 
 def fetch_youtube_transcript(video_id):
+    """
+    Fetch the transcript of a YouTube video using its video ID.
+    """
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = ' '.join([x['text'] for x in transcript])
@@ -140,6 +150,9 @@ def fetch_youtube_transcript(video_id):
         return None
 
 def scrape_website_text(url):
+    """
+    Scrape text content from a website URL.
+    """
     headers = {'User-Agent': get_human_like_user_agent()}
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -149,6 +162,7 @@ def scrape_website_text(url):
             if text:
                 return text
 
+        # If initial request fails, try using cloudscraper
         scraper = cloudscraper.create_scraper()
         response = scraper.get(url)
         if response.status_code == 200:
@@ -163,6 +177,9 @@ def scrape_website_text(url):
         return None
 
 def extract_text_from_soup(soup):
+    """
+    Extract and clean text from BeautifulSoup object.
+    """
     for script in soup(["script", "style"]):
         script.decompose()
     text = ' '.join(soup.stripped_strings)
@@ -170,10 +187,17 @@ def extract_text_from_soup(soup):
     return text
 
 def main_scraper(url):
+    """
+    Determine the type of URL and scrape content accordingly.
+    """
     if 'youtube.com' in url or 'youtu.be' in url:
-        video_id = extract_video_id(url)
-        text = fetch_youtube_transcript(video_id)
-        source_type = "YouTube Transcript"
+        try:
+            video_id = extract_video_id(url)
+            text = fetch_youtube_transcript(video_id)
+            source_type = "YouTube Transcript"
+        except ValueError as ve:
+            st.error(str(ve))
+            return None, None
     else:
         text = scrape_website_text(url)
         source_type = "Website Content"
@@ -181,25 +205,61 @@ def main_scraper(url):
     return text, source_type
 
 def estimate_tokens(text):
+    """
+    Estimate the number of tokens in the text using tiktoken.
+    """
     encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
     tokens = encoding.encode(text)
     return len(tokens)
 
-def get_content_summary(text):
-    sentences = nltk.sent_tokenize(text)
-    words = word_tokenize(text.lower())
-    stop_words = set(stopwords.words('english'))
-    words = [word for word in words if word.isalnum() and word not in stop_words]
+def get_content_statistics(text):
+    """
+    Generate statistics about the content such as token count, word count, etc.
+    """
+    # Word count using regex to find words
+    words = re.findall(r'\b\w+\b', text.lower())
+    word_count = len(words)
+
+    # Character count
+    character_count = len(text)
+
+    # Unique word count
+    unique_words = len(set(words))
+
+    # Sentence count using regex to split sentences
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    sentence_count = len(sentences)
+
+    # Average words per sentence
+    avg_words_per_sentence = word_count / sentence_count if sentence_count else 0
+
+    # Top 5 keywords using CountVectorizer
+    vectorizer = CountVectorizer(stop_words='english', max_features=5)
+    try:
+        X = vectorizer.fit_transform([text])
+        keywords = vectorizer.get_feature_names_out()
+        top_keywords = keywords.tolist()
+    except ValueError:
+        top_keywords = []
+
+    # Readability score
+    readability_score = textstat.flesch_reading_ease(text)
 
     return {
-        'estimated_tokens': estimate_tokens(text),
-        'word_count': len(words),
-        'sentence_count': len(sentences),
-        'avg_words_per_sentence': len(words) / len(sentences) if sentences else 0,
-        'unique_words': len(set(words))
+        'word_count': word_count,
+        'character_count': character_count,
+        'unique_words': unique_words,
+        'sentence_count': sentence_count,
+        'avg_words_per_sentence': avg_words_per_sentence,
+        'top_keywords': top_keywords,
+        'readability_score': readability_score
     }
 
 def generate_ai_summary(text):
+    """
+    Generate an AI-powered summary of the provided text using Google Generative AI.
+    """
     api_key = st.secrets["GEMINI_API_KEY"]
 
     genai.configure(api_key=api_key)
@@ -274,14 +334,82 @@ def generate_ai_summary(text):
         return "Unable to generate summary."
 
 def extract_links(text):
+    """
+    Extract all URLs from the provided text.
+    """
     url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
     return url_pattern.findall(text)
 
 def get_json_download_link(data):
+    """
+    Generate a download link for JSON data.
+    """
     json_str = json.dumps(data, indent=2)
     b64 = base64.b64encode(json_str.encode()).decode()
     href = f'<a href="data:application/json;base64,{b64}" download="scraped_data.json" style="text-decoration:none;"><button style="background-color:#333;color:white;font-weight:bold;border-radius:30px;padding:10px 20px;border:none;box-shadow:0 4px 6px rgba(0,0,0,0.1);transition:all 0.3s;">📥 Download JSON</button></a>'
     return href
+
+def copy_to_clipboard_js(text):
+    """
+    Generate JavaScript code to copy text to clipboard.
+    """
+    escaped_text = text.replace('"', '\\"').replace("'", "\\'")
+    js_code = f"""
+    <script>
+    function copyText() {{
+        navigator.clipboard.writeText("{escaped_text}");
+        alert("Text copied to clipboard!");
+    }}
+    </script>
+    <button onclick="copyText()" style="background-color:#4CAF50;color:white;font-weight:bold;border-radius:30px;padding:10px 20px;border:none;box-shadow:0 4px 6px rgba(0,0,0,0.1);transition:all 0.3s; cursor: pointer;">
+        📋 Copy to Clipboard
+    </button>
+    """
+    return js_code
+
+def get_content_statistics(text):
+    """
+    Generate statistics about the content such as token count, word count, etc.
+    """
+    # Word count using regex to find words
+    words = re.findall(r'\b\w+\b', text.lower())
+    word_count = len(words)
+
+    # Character count
+    character_count = len(text)
+
+    # Unique word count
+    unique_words = len(set(words))
+
+    # Sentence count using regex to split sentences
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    sentence_count = len(sentences)
+
+    # Average words per sentence
+    avg_words_per_sentence = word_count / sentence_count if sentence_count else 0
+
+    # Top 5 keywords using CountVectorizer
+    vectorizer = CountVectorizer(stop_words='english', max_features=5)
+    try:
+        X = vectorizer.fit_transform([text])
+        keywords = vectorizer.get_feature_names_out()
+        top_keywords = keywords.tolist()
+    except ValueError:
+        top_keywords = []
+
+    # Readability score
+    readability_score = textstat.flesch_reading_ease(text)
+
+    return {
+        'word_count': word_count,
+        'character_count': character_count,
+        'unique_words': unique_words,
+        'sentence_count': sentence_count,
+        'avg_words_per_sentence': avg_words_per_sentence,
+        'top_keywords': top_keywords,
+        'readability_score': readability_score
+    }
 
 if scrape_button and url_input.strip():
     with st.spinner("🔍 Scraping in progress... Please wait."):
@@ -297,13 +425,11 @@ if scrape_button and url_input.strip():
                 st.subheader(f"📄 Extracted {source_type}")
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("📋 Copy to Clipboard"):
-                        st.session_state['clipboard'] = text
-                        st.success("✅ Text copied to clipboard!")
+                    components.html(copy_to_clipboard_js(text), height=50)
                 with col2:
                     json_data = {"url": url_input, "content": text}
                     st.markdown(get_json_download_link(json_data), unsafe_allow_html=True)
-                st.code(text, language="text")
+                st.text_area("Extracted Text:", text, height=300)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             with tab2:
@@ -325,31 +451,54 @@ if scrape_button and url_input.strip():
             with tab3:
                 st.markdown('<div class="tab-content">', unsafe_allow_html=True)
                 st.subheader("📊 Content Analysis")
-                summary_stats = get_content_summary(text)
+                summary_stats = get_content_statistics(text)
 
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
-                    st.metric("🔢 Tokens", summary_stats['estimated_tokens'], delta=None, delta_color="normal")
-                with col2:
-                    st.metric("📚 Words", summary_stats['word_count'], delta=None, delta_color="normal")
-                with col3:
-                    st.metric("🆕 Unique Words", summary_stats['unique_words'], delta=None, delta_color="normal")
-                with col4:
-                    st.metric("📜 Sentences", summary_stats['sentence_count'], delta=None, delta_color="normal")
-                with col5:
-                    st.metric("📏 Avg. Words/Sentence", f"{summary_stats['avg_words_per_sentence']:.2f}", delta=None, delta_color="normal")
+                if summary_stats:
+                    col1, col2, col3, col4, col5, col6 = st.columns(6)
+                    with col1:
+                        st.metric("🔢 Tokens", estimate_tokens(text))
+                    with col2:
+                        st.metric("📚 Words", summary_stats['word_count'])
+                    with col3:
+                        st.metric("🆕 Unique Words", summary_stats['unique_words'])
+                    with col4:
+                        st.metric("📜 Sentences", summary_stats['sentence_count'])
+                    with col5:
+                        st.metric("📏 Avg. Words/Sentence", f"{summary_stats['avg_words_per_sentence']:.2f}")
+                    with col6:
+                        st.metric("📖 Readability Score", f"{summary_stats['readability_score']:.2f}")
 
-                st.subheader("🔗 Extracted Links")
-                links = extract_links(text)
-                if links:
-                    for link in links:
-                        st.markdown(f"<a href='{link}' target='_blank'>{link}</a>", unsafe_allow_html=True)
+                    st.subheader("🔑 Top 5 Keywords")
+                    top_keywords = summary_stats['top_keywords']
+                    if top_keywords:
+                        for idx, keyword in enumerate(top_keywords, 1):
+                            st.write(f"{idx}. {keyword.capitalize()}")
+                    else:
+                        st.write("No significant keywords found.")
+
+                    st.markdown('<hr>', unsafe_allow_html=True)
+
+                    st.subheader("🔗 Extracted Links")
+                    links = extract_links(text)
+                    if links:
+                        unique_links = list(set(links))
+                        for link in unique_links:
+                            st.markdown(f"<a href='{link}' target='_blank'>{link}</a>", unsafe_allow_html=True)
+                    else:
+                        st.write("No links found in the extracted text.")
                 else:
-                    st.write("No links found in the extracted text.")
+                    st.error("Failed to generate content statistics.")
                 st.markdown('</div>', unsafe_allow_html=True)
 
         else:
             st.error("Failed to extract content from the provided URL.")
 
+# Footer with links
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888;'>Made by <a href='https://sidfeels.netlify.app/' target='_blank'>sidfeels</a> | <a href='https://github.com/sidfeels/web-scraper' target='_blank'>Open Source</a> | <a href='https://buymeacoffee.com/sidfeels' target='_blank'>Support me</a></div>", unsafe_allow_html=True)
+st.markdown("""
+<div style='text-align: center; color: #888;'>
+    Made by <a href='https://sidfeels.netlify.app/' target='_blank'>sidfeels</a> |
+    <a href='https://github.com/sidfeels/web-scraper' target='_blank'>Open Source</a> |
+    <a href='https://buymeacoffee.com/sidfeels' target='_blank'>Support me</a>
+</div>
+""", unsafe_allow_html=True)
